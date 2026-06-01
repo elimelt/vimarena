@@ -2,107 +2,145 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
+import time
 from typing import Any
 
-import pynvim
+import pexpect
 
 
 class VimDriver:
-    """Headless neovim driver for programmatic vim interaction."""
+    """PTY-based vim driver - works with vim, vi, or nvim."""
 
     SPECIAL_KEYS = {
         "<Esc>": "\x1b", "<CR>": "\r", "<Enter>": "\r", "<Return>": "\r",
-        "<Tab>": "\t", "<BS>": "\x08", "<Backspace>": "\x08", "<Space>": " ", "<Lt>": "<",
+        "<Tab>": "\t", "<BS>": "\x7f", "<Backspace>": "\x7f", "<Space>": " ", "<Lt>": "<",
     }
-    MODE_NAMES = {
-        "n": "normal", "i": "insert", "v": "visual", "V": "visual-line",
-        "\x16": "visual-block", "c": "command", "R": "replace", "t": "terminal",
-    }
+    EDITORS = ["nvim", "vim", "vi"]
 
-    def __init__(self) -> None:
-        self._nvim: pynvim.Nvim | None = None
+    def __init__(self, rows: int = 24, cols: int = 80) -> None:
+        self._proc: pexpect.spawn | None = None
         self._tmpfile: str | None = None
+        self._rows = rows
+        self._cols = cols
         self._last_buffer: list[str] = []
         self._last_cursor: tuple[int, int] = (1, 1)
         self._last_mode: str = "normal"
+        self._editor: str | None = None
 
     @property
     def is_running(self) -> bool:
-        return self._nvim is not None
+        return self._proc is not None and self._proc.isalive()
 
     def start(self, content: list[str] | None = None) -> None:
         self.stop()
+
+        # Find available editor
+        for editor in self.EDITORS:
+            if shutil.which(editor):
+                self._editor = editor
+                break
+        if not self._editor:
+            raise RuntimeError("No vim/vi/nvim found in PATH")
+
+        # Create temp file with content
         fd, self._tmpfile = tempfile.mkstemp(suffix=".txt", prefix="vimarena_")
         os.close(fd)
         if content:
             with open(self._tmpfile, "w") as f:
                 f.write("\n".join(content))
-        self._nvim = pynvim.attach("child", argv=["nvim", "--headless", "--embed", "-u", "NONE", self._tmpfile])
-        self._nvim.feedkeys("\x1b", "n", True)
+
+        # Spawn vim in pty
+        cmd = f"{self._editor} -u NONE {self._tmpfile}"
+        self._proc = pexpect.spawn(cmd, dimensions=(self._rows, self._cols), encoding="utf-8")
+        self._proc.delaybeforesend = 0.01
+        time.sleep(0.1)  # Let vim initialize
+        self._read_state()
 
     def stop(self) -> None:
-        if self._nvim:
+        if self._proc:
             try:
-                self._nvim.command("qa!")
+                if self._proc.isalive():
+                    self._proc.sendline("\x1b:qa!")
+                    self._proc.wait()
             except Exception:
                 pass
-            self._nvim = None
+            self._proc = None
         if self._tmpfile and os.path.exists(self._tmpfile):
             os.remove(self._tmpfile)
             self._tmpfile = None
 
     def get_buffer(self) -> list[str]:
-        if not self._nvim:
-            return self._last_buffer
-        return list(self._nvim.current.buffer[:])
+        if self._tmpfile and os.path.exists(self._tmpfile):
+            with open(self._tmpfile) as f:
+                return f.read().splitlines()
+        return self._last_buffer
 
     def set_buffer(self, lines: list[str]) -> None:
-        self._nvim.current.buffer[:] = lines
+        if self._tmpfile:
+            with open(self._tmpfile, "w") as f:
+                f.write("\n".join(lines))
         self._last_buffer = list(lines)
+        # Reload in vim
+        if self.is_running:
+            self.send_keys("\x1b:e!<CR>")
 
     def get_cursor(self) -> tuple[int, int]:
-        if not self._nvim:
-            return self._last_cursor
-        row, col = self._nvim.current.window.cursor
-        return (row, col + 1)
+        return self._last_cursor
 
     def set_cursor(self, line: int, col: int) -> None:
-        self._nvim.current.window.cursor = (line, max(0, col - 1))
+        if self.is_running:
+            self.send_keys(f"\x1b{line}G{col}|")
         self._last_cursor = (line, col)
 
     def get_mode(self) -> str:
-        if not self._nvim:
-            return self._last_mode
-        mode = self._nvim.api.get_mode()["mode"]
-        return self.MODE_NAMES.get(mode, mode)
+        return self._last_mode
 
-    def send_keys(self, keys: str) -> bool:
-        self._cache_state()
+    def get_screen(self) -> str:
+        """Get raw terminal screen content."""
+        if not self.is_running:
+            return ""
         try:
-            self._nvim.feedkeys(self._translate_keys(keys), "t", True)
-            self._nvim.command("redraw")
-            self._cache_state()
-            return True
-        except Exception:
-            self._nvim = None
-            return False
-
-    def _cache_state(self) -> None:
-        if not self._nvim:
-            return
-        try:
-            self._last_buffer = list(self._nvim.current.buffer[:])
-            row, col = self._nvim.current.window.cursor
-            self._last_cursor = (row, col + 1)
-            self._last_mode = self.MODE_NAMES.get(self._nvim.api.get_mode()["mode"], "normal")
+            self._proc.expect([pexpect.TIMEOUT], timeout=0.05)
         except Exception:
             pass
+        return self._strip_ansi(self._proc.before or "")
+
+    def send_keys(self, keys: str) -> bool:
+        if not self.is_running:
+            return False
+        translated = self._translate_keys(keys)
+        try:
+            self._proc.send(translated)
+            time.sleep(0.05)  # Let vim process
+            self._read_state()
+            return self.is_running
+        except Exception:
+            return False
+
+    def _read_state(self) -> None:
+        if not self.is_running:
+            return
+        # Read current file content
+        if self._tmpfile and os.path.exists(self._tmpfile):
+            # Force vim to write current state
+            try:
+                self._proc.send("\x1b:w\r")
+                time.sleep(0.05)
+                with open(self._tmpfile) as f:
+                    self._last_buffer = f.read().splitlines()
+            except Exception:
+                pass
 
     def _translate_keys(self, keys: str) -> str:
         for notation, char in self.SPECIAL_KEYS.items():
             keys = keys.replace(notation, char)
         return re.sub(r"<C-([a-zA-Z])>", lambda m: chr(ord(m.group(1).lower()) - ord("a") + 1), keys, flags=re.I)
+
+    @staticmethod
+    def _strip_ansi(text: str) -> str:
+        return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]", "", text)
 
     def __enter__(self) -> VimDriver:
         return self

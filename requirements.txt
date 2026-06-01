@@ -1,10 +1,2 @@
 # VimArena dependencies
-#
-# - Local dev: install with `pip install -r requirements.txt`
-# - Platform: sandbox/worker runs `pip install -r requirements.txt` on submit.
-#
-# Do not list bench_common / mesocosm here — the CLI wheel (local) and the
-# sandbox image (cloud) already provide bench_common, fastapi, uvicorn, httpx,
-# and pydantic for adapter.py.
-
-pynvim>=0.5.0
+pexpect>=4.8.0
