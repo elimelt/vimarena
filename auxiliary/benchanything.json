@@ -1,0 +1,76 @@
+{
+  "id": "vimarena",
+  "adapter": "adapter.py",
+  "name": "VimArena",
+  "description": "Evaluates AI agents on vim editing tasks in real CLI contexts like git rebase.",
+
+  "binding_vow": {
+    "version": "1.0.0",
+    "tier": "tier1",
+    "description": "Agent encounters vim through CLI tools (git rebase, commit, etc). Must edit buffers correctly using vim keystrokes/commands and save/exit. Primary scenario: git interactive rebase. Observation can be structured JSON or raw terminal output.",
+
+    "observation_space": {
+      "type": "json",
+      "description": "Structured: { type, task, buffer, cursor, mode, context, target_hint }. Raw: { type, terminal, task } where terminal is vim screen output."
+    },
+
+    "action_space": {
+      "type": "text",
+      "description": "Vim keystrokes (e.g., 'dd', 'cwsquash<Esc>', ':wq<CR>') or ex commands. Special keys: <Esc>, <CR>, <Tab>, <BS>, <C-x>."
+    },
+
+    "reward": {
+      "type": "scalar",
+      "range": { "low": 0.0, "high": 1.0 },
+      "description": "1.0 if task completed correctly (e.g., rebase todo edited properly), partial credit for partial completion"
+    },
+
+    "episode": {
+      "max_steps": 10,
+      "deterministic_reset": true,
+      "supports_seed": true,
+      "parallel_episodes": 1,
+      "observability": "full"
+    },
+
+    "techniques": []
+  },
+
+  "scoring": {
+    "primary_metric": "accuracy",
+    "higher_is_better": true,
+    "metrics": [
+      {
+        "name": "accuracy",
+        "type": "episode_reward",
+        "aggregation": "pass_rate"
+      },
+      {
+        "name": "avg_reward",
+        "type": "episode_reward",
+        "aggregation": "mean"
+      }
+    ]
+  },
+
+  "scenarios": {
+    "default": "git_rebase",
+    "available": [
+      {
+        "id": "git_rebase",
+        "name": "Git Interactive Rebase",
+        "description": "Edit git rebase todo list to reorder, squash, fixup, or drop commits"
+      },
+      {
+        "id": "vim_basics",
+        "name": "Vim Basics",
+        "description": "Foundational vim operations: delete, insert, navigate, search/replace"
+      },
+      {
+        "id": "vim_escape",
+        "name": "Vim Escape",
+        "description": "Exit vim correctly from various modes - critical for CLI tool usage"
+      }
+    ]
+  }
+}
