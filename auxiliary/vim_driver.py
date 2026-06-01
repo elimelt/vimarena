@@ -3,21 +3,52 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from typing import Any
 
 import pexpect
 
+VIM_APPIMAGE_URL = "https://github.com/vim/vim-appimage/releases/download/v9.2.0555/Vim-v9.2.0555.glibc2.34-x86_64.AppImage"
+
+
+def _ensure_vim() -> str:
+    """Find or install vim, return path to executable."""
+    for editor in ["nvim", "vim", "vi"]:
+        path = shutil.which(editor)
+        if path:
+            return path
+
+    # Install vim AppImage to user cache
+    cache_dir = os.path.expanduser("~/.cache/vimarena")
+    vim_bin = os.path.join(cache_dir, "squashfs-root/usr/bin/vim")
+
+    if os.path.exists(vim_bin):
+        return vim_bin
+
+    os.makedirs(cache_dir, exist_ok=True)
+    appimage = os.path.join(cache_dir, "vim.appimage")
+
+    # Use urllib instead of curl for portability
+    import urllib.request
+    urllib.request.urlretrieve(VIM_APPIMAGE_URL, appimage)
+    os.chmod(appimage, 0o755)
+    subprocess.run([appimage, "--appimage-extract"], cwd=cache_dir, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    if os.path.exists(vim_bin):
+        return vim_bin
+    raise RuntimeError("Failed to install vim")
+
 
 class VimDriver:
-    """PTY-based vim driver - works with vim, vi, or nvim."""
+    """PTY-based vim driver - works with vim, vi, or nvim. Auto-installs if needed."""
 
     SPECIAL_KEYS = {
         "<Esc>": "\x1b", "<CR>": "\r", "<Enter>": "\r", "<Return>": "\r",
         "<Tab>": "\t", "<BS>": "\x7f", "<Backspace>": "\x7f", "<Space>": " ", "<Lt>": "<",
     }
-    EDITORS = ["nvim", "vim", "vi"]
 
     def __init__(self, rows: int = 24, cols: int = 80) -> None:
         self._proc: pexpect.spawn | None = None
@@ -35,14 +66,7 @@ class VimDriver:
 
     def start(self, content: list[str] | None = None) -> None:
         self.stop()
-
-        # Find available editor
-        for editor in self.EDITORS:
-            if shutil.which(editor):
-                self._editor = editor
-                break
-        if not self._editor:
-            raise RuntimeError("No vim/vi/nvim found in PATH")
+        self._editor = _ensure_vim()
 
         # Create temp file with content
         fd, self._tmpfile = tempfile.mkstemp(suffix=".txt", prefix="vimarena_")
